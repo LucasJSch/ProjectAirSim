@@ -471,7 +471,7 @@ void AUnrealScene::Tick(float DeltaTime) {
 
       // Wait for sim to catch up processing new sim time
       while (projectairsim::SimClock::Get()->NowSimNanos() < cur_sim_time) {
-        std::this_thread::sleep_for(std::chrono::duration<double>(0));
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
       }
       // If cur_sim_time is now at the time for simclock to pause, pause
       // Unreal now so physics will not advance again at the next tick.

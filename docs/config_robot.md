@@ -362,7 +362,7 @@ The `px4-settings` collection contains the settings for the PX4 flight controlle
   "parameters": {
     "NAV_RCL_ACT": 0,
     "NAV_DLL_ACT": 0,
-    "COM_OBL_ACT": 1,
+    "COM_OBL_RC_ACT": 1,
     "LPE_LAT": 47.641468,
     "LPE_LON": -122.140165
   },

@@ -6,6 +6,7 @@
 #ifndef MULTIROTOR_API_INCLUDE_MAVLINK_API_HPP_
 #define MULTIROTOR_API_INCLUDE_MAVLINK_API_HPP_
 
+#include <atomic>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
@@ -357,6 +358,9 @@ class MavLinkApi : public VTOLFWApiBase {
   std::shared_ptr<mavlinkcom::MavLinkNode> hil_node_;
   std::shared_ptr<mavlinkcom::MavLinkNode> gimbal_node_;
   std::shared_ptr<mavlinkcom::MavLinkConnection> connection_;
+  // Serializes lifecycle of connection_/hil_node_/gimbal_node_/mav_vehicle_
+  // between the scene-tick thread send path and teardown.
+  mutable std::mutex connection_mutex_;
   // std::shared_ptr<mavlinkcom::MavLinkVideoServer> video_server_;
   std::shared_ptr<MultirotorApiBase> mav_vehicle_control_;
 
@@ -408,8 +412,13 @@ class MavLinkApi : public VTOLFWApiBase {
   std::thread connect_thread_;
   bool connecting_ = false;  // If true, we're trying to establish a connection
                              // to the controller
-  bool connected_ = false;   // If true, we've established a connection to the
-                             // controller and started vehicle setup
+  std::atomic<bool> connected_{false};  // If true, we've established a
+                             // connection to the controller and started vehicle
+                             // setup. Atomic: read on the tick thread, written
+                             // on the connect/game threads.
+  std::atomic<bool> stopping_{false};  // If true, teardown is in progress
+                             // (EndUpdate); Update() must not auto-reconnect and
+                             // its lockstep wait must bail out promptly.
   bool connected_vehicle_ =
       false;  // If true, we've completed the connection and vehicle setup and
               // the vehicle is ready for use

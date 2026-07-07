@@ -394,6 +394,7 @@ if(UNIX)
         COMMAND ${CMAKE_COMMAND} -E copy_directory "${OPENSSL_INCLUDE_DIR}" "${UE_PLUGIN_SIMLIBS_DIR}/openssl/include"
         COMMAND ${CMAKE_COMMAND} -E remove_directory "${UE_PLUGIN_SIMLIBS_DIR}/openssl/$<IF:$<CONFIG:Release>,Release,Debug>/cmake"
         COMMAND ${CMAKE_COMMAND} -E remove_directory "${UE_PLUGIN_SIMLIBS_DIR}/openssl/$<IF:$<CONFIG:Release>,Release,Debug>/pkgconfig"
+        # BYPRODUCTS ${OPENSSL_CRYPTO_LIBRARY} ${OPENSSL_SSL_LIBRARY}
         DEPENDEES install
     )
 endif()
