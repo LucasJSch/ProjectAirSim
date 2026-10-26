@@ -270,6 +270,9 @@ bool MultirotorApiBase::Takeoff(float timeout_sec,
 
   auto kinematics = GetKinematicsEstimated();
   if (kinematics.twist.linear.norm() > approx_zero_vel_) {
+    sim_robot_.GetLogger().LogWarning(
+        GetControllerName(), "Takeoff rejected: vehicle is moving (%f m/s)",
+        kinematics.twist.linear.norm());
     return false;
     // TODO: Should we introduce such exceptions in V2?
     /*throw VehicleMoveException(
@@ -806,22 +809,29 @@ bool MultirotorApiBase::MoveOnPathInternal(
   vehicle_apis::FunctionCaller function_caller(GetCommandPeriod(), timeout_sec,
                                  GetCancelToken(), command_start_time_nanos);
 
-  // initialize next path position
-  if (SetNextPathPosition(path3d, path_segs, cur_path_loc,
-                          lookahead + lookahead_error, next_path_loc) > 0) {
-    return true;  // Already at or past end of path
-  }
+  // Lookahead may reach past the endpoint before the vehicle has moved.
+  // SetNextPathPosition clamps the target; its overshoot is not arrival.
+  SetNextPathPosition(path3d, path_segs, cur_path_loc,
+                      lookahead + lookahead_error, next_path_loc);
 
   float overshoot = 0;
   float goal_dist = 0;
-  constexpr float kGoalDistTolerance = 0.01;  // meters
-
-  // until we are at the end of the path (last seg is always zero size)
-  while (
-      !function_caller.IsTimeout() &&
-      (next_path_loc.seg_index < path_segs.size() - 1 ||
-       goal_dist > kGoalDistTolerance)) {  // current position is approximately
-                                           // at the last end point
+  // Projected progress advances the path cursor, but only measured distance
+  // establishes arrival. Small/negative progress must not end the command.
+  while (!function_caller.IsTimeout() && !GetCancelToken().IsCancelled()) {
+    const float endpoint_error = (GetPosition() - path3d.back()).norm();
+    if (next_path_loc.seg_index == path_segs.size() - 1 &&
+        endpoint_error <= GetDistanceAccuracy()) {
+      // Leave no stale translation or yaw-rate command after successful arrival.
+      // A cancelled task must not issue a stop for its replacement.
+      if (GetCancelToken().IsCancelled()) break;
+      MoveByVelocityInternal(0, 0, 0, true, 0);
+      function_caller.Complete();
+      sim_robot_.GetLogger().LogTrace(
+          GetControllerName(), "MoveOnPath complete: endpoint_error=%f m",
+          endpoint_error);
+      break;
+    }
 
     float seg_velocity = path_segs.at(next_path_loc.seg_index).seg_velocity;
     float path_length_remaining =
@@ -834,12 +844,11 @@ bool MultirotorApiBase::MoveOnPathInternal(
 
     // send drone command to get to next lookahead
     MoveToPathPosition(next_path_loc.position, seg_velocity, drivetrain,
-                       yaw_is_rate, yaw,
-                       path_segs.at(cur_path_loc.seg_index).start_z);
+                       yaw_is_rate, yaw);
 
     // sleep for rest of the cycle
     if (!function_caller.WaitForInterval()) {
-      return false;
+      break;
     }
 
     /*  Below, P is previous position on path, N is next goal and C is our
@@ -879,8 +888,7 @@ bool MultirotorApiBase::MoveOnPathInternal(
     // how much have we moved towards last goal?
     const Vector3& goal_vect = next_path_loc.position - cur_path_loc.position;
 
-    if (!goal_vect.isZero()) {  // goal can only be zero if we are at the end
-                                // of path
+    if (!goal_vect.isZero()) {
       const Vector3& actual_vect = GetPosition() - cur_path_loc.position;
 
       // project actual vector on goal vector
@@ -913,16 +921,18 @@ bool MultirotorApiBase::MoveOnPathInternal(
     } else {
       lookahead_error_increasing = 0;
       goal_dist = 0;
-      lookahead_error = 0;  // this is not really required because we will exit
-      function_caller.Complete();
+      // Both path cursors can reach the endpoint while the vehicle is still
+      // displaced laterally or has overshot it. Keep commanding that endpoint.
+      lookahead_error = 0;
     }
 
-    // log("PF: cur=%s, goal_dist=%f, cur_path_loc=%s,
-    // next_path_loc=%s, lookahead_error=%f",
-    //     VectorMath::toString(getPosition()).c_str(), goal_dist,
-    //     VectorMath::toString(cur_path_loc.position).c_str(),
-    //     VectorMath::toString(next_path_loc.position).c_str(),
-    //     lookahead_error);
+    sim_robot_.GetLogger().LogTrace(
+        GetControllerName(),
+        "MoveOnPath: progress=%f m, endpoint_error=%f m, "
+        "lookahead=(%f, %f, %f)",
+        goal_dist, (GetPosition() - path3d.back()).norm(),
+        next_path_loc.position.x(), next_path_loc.position.y(),
+        next_path_loc.position.z());
 
     // if drone moved backward, we don't want goal to move backward as well
     // so only climb forward on the path, never back. Also note >= which means
@@ -942,6 +952,12 @@ bool MultirotorApiBase::MoveOnPathInternal(
                                     lookahead + lookahead_error, next_path_loc);
   }
 
+  if (!function_caller.IsComplete()) {
+    sim_robot_.GetLogger().LogWarning(
+        GetControllerName(), "MoveOnPath %s: endpoint_error=%f m",
+        GetCancelToken().IsCancelled() ? "cancelled" : "timed out",
+        (GetPosition() - path3d.back()).norm());
+  }
   return function_caller.IsComplete();
 }
 
@@ -1296,8 +1312,7 @@ bool MultirotorApiBase::WaitForZ(float timeout_sec, float z, float margin,
 
 void MultirotorApiBase::MoveToPathPosition(const Vector3& dest, float velocity,
                                            DrivetrainType drivetrain,
-                                           bool yaw_is_rate, float yaw,
-                                           float last_z) {
+                                           bool yaw_is_rate, float yaw) {
   // validate dest
   if (dest.hasNaN()) {
     throw std::invalid_argument(sim_robot_.GetLogger().FormatMessage(
@@ -1318,7 +1333,7 @@ void MultirotorApiBase::MoveToPathPosition(const Vector3& dest, float velocity,
 
   // find velocity vector
   Vector3 velocity_vect;
-  if (cur_dest_norm <
+  if (cur_dest_norm <=
       GetDistanceAccuracy())  // our dest is approximately same as current
   {
     velocity_vect = Vector3::Zero();
@@ -1336,31 +1351,14 @@ void MultirotorApiBase::MoveToPathPosition(const Vector3& dest, float velocity,
         (cur_dest / cur_dest_norm) * (cur_dest_norm / GetCommandPeriod());
   }
 
-  // send commands
-  // try to maintain altitude if path was in XY plan only, velocity based
-  // control is not as good
-  if (std::abs(cur.z() - dest.z()) <=
-      GetDistanceAccuracy())  // for paths in XY plan current code leaves z
-                              // untouched, so we can compare with strict
-                              // equality
-  {
-    // When close to target Z altitude, use MoveByVelocityInternal() with zero
-    // vertical speed target instead of MoveByVelocityInternal() with the
-    // absolute target destination altitude to avoid oscillations at high
-    // altitude (this is the same patch as implemented in v1, but doesn't
-    // explain why the effect is related to high altitude so it may just be a
-    // workaround).
-    MoveByVelocityInternal(velocity_vect.x(), velocity_vect.y(), 0, yaw_is_rate,
-                           yaw);
-    // MoveByVelocityZInternal(velocity_vect.x(), velocity_vect.y(), dest.z(),
-    //                         yaw_is_rate, yaw);
-    // TODO Investigate the root cause of the original oscillation when using
-    // MoveByVelocityZInternal() in case there is some other issue with our
-    // controller/environment/physics calculations at high altitudes.
-  } else {
-    MoveByVelocityInternal(velocity_vect.x(), velocity_vect.y(),
-                           velocity_vect.z(), yaw_is_rate, yaw);
-  }
+  // Use the same full-vector tolerance as arrival. Suppressing Z separately
+  // can leave a mixed-axis path outside that tolerance. Retain velocity control
+  // rather than switching to the altitude controller near the target.
+  sim_robot_.GetLogger().LogTrace(
+      GetControllerName(), "MoveOnPath velocity=(%f, %f, %f), target_error=%f m",
+      velocity_vect.x(), velocity_vect.y(), velocity_vect.z(), cur_dest_norm);
+  MoveByVelocityInternal(velocity_vect.x(), velocity_vect.y(), velocity_vect.z(),
+                         yaw_is_rate, yaw);
 }
 
 bool MultirotorApiBase::SafetyCheckVelocity(const Vector3& velocity) {
@@ -1384,7 +1382,7 @@ float MultirotorApiBase::SetNextPathPosition(
     const PathSegment& seg = path_segs.at(i);
     if (seg.seg_length > 0 &&  // protect against duplicate points in path,
                                // normalized seg will have NaN
-        seg.seg_length >= next_dist + offset) {
+        seg.seg_length > next_dist + offset) {
       next_path_loc.seg_index = i;
       next_path_loc.offset =
           next_dist +
@@ -1393,7 +1391,9 @@ float MultirotorApiBase::SetNextPathPosition(
           path.at(i) + seg.seg_normalized * next_path_loc.offset;
       return 0;
     }
-    // otherwise use up this segment, move on to next one
+    // At an exact endpoint, advance too: the final target must be represented
+    // by the terminal segment even when lookahead exactly equals path length.
+    // Otherwise use up this segment and move on to the next one.
     next_dist -= seg.seg_length - offset;
     offset = 0;
 

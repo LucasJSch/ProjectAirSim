@@ -495,7 +495,7 @@ class MultirotorApiBase : public IController,
                  bool& yaw_is_rate, float& yaw);
   void MoveToPathPosition(const Vector3& dest, float velocity,
                           DrivetrainType drivetrain, bool yaw_is_rate,
-                          float yaw, float last_z);
+                          float yaw);
 
   void LoadSettings();
 

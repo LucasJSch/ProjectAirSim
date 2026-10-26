@@ -156,7 +156,9 @@ class Drone(Robot):
         self, timeout_sec=20, callback: callable = None
     ) -> asyncio.Task:
         """
-        Takeoff vehicle to 3m above ground. Vehicle should not be moving when this API is used
+        Ascend by the controller-defined takeoff height from the current position.
+        SimpleFlight defaults to a 2 m ascent, with its 0.5 m arrival tolerance.
+        The vehicle should not be moving when this API is used.
 
         Args:
             timeout_sec (int): Timeout for the vehicle to reach desired altitude
